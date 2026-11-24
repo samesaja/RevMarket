@@ -3,6 +3,7 @@ import {Link, useLocation} from 'react-router-dom';
 import {formatAmount} from '../../../shared/amount.mjs';
 import {loadMarketDetail, parseMarketId, parseMarketSide} from '../lib/market-path.mjs';
 import {fetchPriceCandles} from '../lib/market-data.mjs';
+import {normalizeExpectedDigest, verifyLocalEvidenceBytes} from '../lib/evidence-verifier.mjs';
 import MarketAvatar from './MarketAvatar.jsx';
 import MiniChart from './MiniChart.jsx';
 import PhosphorIcon from '../icons/PhosphorIcon.jsx';
@@ -49,7 +50,12 @@ export default function MarketDetailPage({
     error: '',
   });
   const [retryCount, setRetryCount] = useState(0);
+  const [evidenceState, setEvidenceState] = useState({marketId: null, fileName: '', status: 'idle', result: null});
   const requestSeq = useRef(0);
+
+  useEffect(() => {
+    setEvidenceState({marketId, fileName: '', status: 'idle', result: null});
+  }, [marketId]);
 
   useEffect(() => {
     setSide(parseMarketSide(location.search));
@@ -289,7 +295,83 @@ export default function MarketDetailPage({
             )}
           </section>
 
-          <section className="detail-pane">
+          <section className="detail-panel" aria-labelledby="settlement-evidence-heading">
+            <p className="eyebrow">SETTLEMENT & EVIDENCE VERIFICATION</p>
+            <h2 id="settlement-evidence-heading">Resolution outcome and local evidence check</h2>
+            <div className="detail-facts">
+              <div>
+                <span>Status</span>
+                <strong>{status}</strong>
+              </div>
+              <div>
+                <span>Resolved Outcome</span>
+                <strong>
+                  {market.status === 2
+                    ? Number(market.outcome) === 1
+                      ? 'YES'
+                      : 'NO'
+                    : timedOut || market.status === 3
+                      ? 'Timeout / Refundable'
+                      : 'Pending settlement'}
+                </strong>
+              </div>
+              {market.confidence !== undefined && market.confidence !== null && Number(market.confidence) > 0 && (
+                <div>
+                  <span>Confidence</span>
+                  <strong>{(Number(market.confidence) / 100).toFixed(2)}%</strong>
+                </div>
+              )}
+              <div>
+                <span>On-Chain Evidence Digest</span>
+                <strong className="mono-digest">
+                  {(() => {
+                    const commitment = normalizeExpectedDigest(market.evidence);
+                    if (commitment.status === 'ready') return commitment.digest;
+                    if (timedOut || market.status === 3) return 'None (timeout refund without evidence)';
+                    if (commitment.status === 'zero_digest') return 'All-zero digest (no evidence recorded)';
+                    if (commitment.status === 'malformed_commitment') return 'Malformed on-chain digest';
+                    return 'No evidence digest recorded yet';
+                  })()}
+                </strong>
+              </div>
+            </div>
+
+            {normalizeExpectedDigest(market.evidence).status === 'ready' && (
+              <div className="evidence-verifier-box">
+                <label htmlFor="local-evidence-file" className="amount-input">
+                  Verify local evidence JSON file (raw bytes stay in your browser)
+                  <input
+                    id="local-evidence-file"
+                    type="file"
+                    accept=".json,application/json"
+                    onChange={async event => {
+                      const file = event.target.files?.[0];
+                      if (!file) {
+                        setEvidenceState({marketId, fileName: '', status: 'idle', result: null});
+                        return;
+                      }
+                      setEvidenceState({marketId, fileName: file.name, status: 'verifying', result: null});
+                      const bytes = new Uint8Array(await file.arrayBuffer());
+                      const result = await verifyLocalEvidenceBytes(bytes, {market, contractId: market.contractId});
+                      setEvidenceState({
+                        marketId,
+                        fileName: file.name,
+                        status: result.ok ? 'verified' : 'failed',
+                        result,
+                      });
+                    }}
+                  />
+                </label>
+                {evidenceState.marketId === marketId && evidenceState.result && (
+                  <div role="status" className={evidenceState.result.ok ? 'evidence-status is-verified' : 'evidence-status is-failed'}>
+                    <p>
+                      <strong>{evidenceState.result.ok ? 'Verified:' : `Verification failed (${evidenceState.result.code}):`}</strong>{' '}
+                      {evidenceState.result.ok ? evidenceState.result.disclaimer : evidenceState.result.message}
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
           </section>
         </div>
       </div>
