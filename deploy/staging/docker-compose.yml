@@ -17,6 +17,7 @@ services:
       BACKEND_PORT: "3001"
       APP_ORIGIN: ${APP_ORIGIN:?APP_ORIGIN is required}
       BACKEND_DB: /var/lib/revmarket/db/revmarket.sqlite
+      FRONTEND_DIST_DIR: ${FRONTEND_DIST_DIR:-/app/frontend/dist}
       BACKEND_SHUTDOWN_TIMEOUT_MS: ${BACKEND_SHUTDOWN_TIMEOUT_MS:-5000}
       SUPER_ADMIN_WALLETS: ${SUPER_ADMIN_WALLETS:-}
       PINATA_JWT: ${PINATA_JWT:-}

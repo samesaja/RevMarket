@@ -1,5 +1,7 @@
 import {createServer} from 'node:http';
 import {createHash,randomBytes} from 'node:crypto';
+import {readFile,stat} from 'node:fs/promises';
+import {extname,resolve as resolvePath,sep} from 'node:path';
 import {correlationId,writeStructuredLog} from '../shared/observability.mjs';
 import {File} from 'node:buffer';
 import {Keypair,Networks,StrKey} from '@stellar/stellar-sdk';
@@ -292,7 +294,10 @@ export function createApi(options={}){
     getAiSuggestionsFn=null,
     contractId=undefined,
     staleAfterSeconds=DEFAULT_STALE_AFTER_SECONDS,
+    staticDir=process.env.FRONTEND_DIST_DIR||null,
   }=options;
+  const resolvedStaticRoot=staticDir?resolvePath(staticDir):null;
+  const mimeTypes={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.mjs':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.ico':'image/x-icon','.woff2':'font/woff2'};
   const origin=new URL(appOrigin);
   if(origin.origin!==appOrigin || origin.username || origin.password || !['http:','https:'].includes(origin.protocol))throw new Error('APP_ORIGIN must be an exact HTTP(S) origin');
   if(origin.protocol==='http:' && !['127.0.0.1','localhost','[::1]'].includes(origin.hostname))throw new Error('Non-local APP_ORIGIN requires HTTPS');
@@ -734,6 +739,33 @@ export function createApi(options={}){
         db.exec('BEGIN IMMEDIATE');
         try{db.prepare('DELETE FROM challenges WHERE wallet=?').run(wallet);db.prepare('DELETE FROM users WHERE wallet=?').run(wallet);db.exec('COMMIT');}catch(e){db.exec('ROLLBACK');throw e;}
         return send(200,{deleted:true,onChainDataUnchanged:true},{'Set-Cookie':cookie('',0)});
+      }
+      if(resolvedStaticRoot && ['GET','HEAD'].includes(req.method) && url.pathname!=='/api' && !url.pathname.startsWith('/api/')){
+        const relPath=decodeURIComponent(url.pathname).replace(/^\/+/,'');
+        const candidate=resolvePath(resolvedStaticRoot,relPath||'index.html');
+        const withinRoot=candidate===resolvedStaticRoot||candidate.startsWith(resolvedStaticRoot+sep);
+        if(!withinRoot)throw new ApiError(403,'Forbidden');
+        let targetFile=candidate;
+        let fileStat=await stat(targetFile).catch(()=>null);
+        if(!fileStat||!fileStat.isFile()){
+          if(extname(relPath))throw new ApiError(404,'Asset not found');
+          targetFile=resolvePath(resolvedStaticRoot,'index.html');
+          fileStat=await stat(targetFile).catch(()=>null);
+        }
+        if(fileStat&&fileStat.isFile()){
+          const ext=extname(targetFile).toLowerCase();
+          const contentType=mimeTypes[ext]||'application/octet-stream';
+          const bodyBytes=req.method==='HEAD'?Buffer.alloc(0):await readFile(targetFile);
+          res.writeHead(200,{
+            'Content-Type':contentType,
+            'Cache-Control':ext==='.html'?'no-cache':'public, max-age=31536000, immutable',
+            'X-Content-Type-Options':'nosniff',
+            'Referrer-Policy':'no-referrer',
+            'X-Request-Id':requestId,
+            ...rateHeaders,
+          });
+          return res.end(bodyBytes);
+        }
       }
       throw new ApiError(404,'Endpoint not found');
     }catch(e){
