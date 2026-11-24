@@ -3,6 +3,7 @@ import {createHash,randomBytes} from 'node:crypto';
 import {correlationId,writeStructuredLog} from '../shared/observability.mjs';
 import {File} from 'node:buffer';
 import {Keypair,Networks,StrKey} from '@stellar/stellar-sdk';
+import {encodeRulesV1,RULES_SCHEMA} from '../shared/rules-digest.mjs';
 import {DEFAULT_STALE_AFTER_SECONDS,queryVerifiedWalletActivity,validateVerifiedActivityConfig} from './verified-activity.mjs';
 import {
   DEFAULT_AI_RATE_LIMIT,
@@ -57,18 +58,72 @@ function buildIntentParams(revision){
     implementationVersion:revision.implementation_version||'',
   };
 }
+function buildCanonicalRulesInput(revision){
+  let sources=[];
+  try{
+    const parsed=JSON.parse(revision.sources_json||'[]');
+    if(Array.isArray(parsed))sources=parsed;
+  }catch{sources=[];}
+  return {
+    schema:RULES_SCHEMA,
+    network:targetNetwork,
+    question:revision.question,
+    category:revision.category||'',
+    tradingClose:revision.trading_close,
+    observationTime:revision.observation_time??null,
+    resolutionDeadline:revision.resolution_deadline??null,
+    yesRule:revision.yes_rule||'',
+    noRule:revision.no_rule||'',
+    equalityRule:revision.equality_rule?revision.equality_rule:null,
+    sources,
+    fallbackRule:revision.fallback_rule?revision.fallback_rule:null,
+    unavailableDataRule:revision.unavailable_data_rule||'',
+    collateral:revision.collateral||'native',
+    feeBps:revision.fee_bps??0,
+    resolver:revision.resolver||'',
+    policyVersion:revision.policy_version||'',
+    implementationVersion:revision.implementation_version||'',
+  };
+}
 function formatPublicationIntent(row){
+  const isLegacy=row.revision_content_hash && row.rules_digest===row.revision_content_hash;
+  let canonicalRules=null;
+  if(!isLegacy && row.revision_question!==undefined){
+    try{
+      canonicalRules=encodeRulesV1(buildCanonicalRulesInput({
+        question:row.revision_question,
+        category:row.revision_category,
+        trading_close:row.revision_trading_close,
+        observation_time:row.revision_observation_time,
+        resolution_deadline:row.revision_resolution_deadline,
+        yes_rule:row.revision_yes_rule,
+        no_rule:row.revision_no_rule,
+        equality_rule:row.revision_equality_rule,
+        sources_json:row.revision_sources_json,
+        fallback_rule:row.revision_fallback_rule,
+        unavailable_data_rule:row.revision_unavailable_data_rule,
+        collateral:row.revision_collateral,
+        fee_bps:row.revision_fee_bps,
+        resolver:row.revision_resolver,
+        policy_version:row.revision_policy_version,
+        implementation_version:row.revision_implementation_version,
+      })).payload;
+    }catch{canonicalRules=null;}
+  }
   return {
     id:row.id,
     draftId:row.draft_id,
     revisionId:row.revision_id,
     revisionNumber:row.revision_number,
+    revisionContentHash:row.revision_content_hash||null,
     reviewDecisionId:row.review_decision_id,
     creatorWallet:row.creator_wallet,
     reviewerWallet:row.reviewer_wallet,
     targetNetwork:row.target_network,
     networkPassphrase:row.network_passphrase,
     rulesDigest:row.rules_digest,
+    rulesDigestVersion:isLegacy?'legacy_revision_hash':RULES_SCHEMA,
+    canonicalRules,
     paramsHash:row.params_hash,
     parameters:JSON.parse(row.params_json),
     approvalExpiry:row.approval_expiry,
@@ -86,7 +141,16 @@ function formatPublicationIntent(row){
 }
 function reconcileIntentState(db,intentId,time){
   const row=db.prepare(`
-    SELECT pi.*, r.revision_number, d.status AS draft_status, d.current_revision_id, rv.revoked_at AS reviewer_revoked_at
+    SELECT pi.*, r.revision_number, r.content_hash AS revision_content_hash,
+      r.question AS revision_question, r.category AS revision_category,
+      r.trading_close AS revision_trading_close, r.observation_time AS revision_observation_time,
+      r.resolution_deadline AS revision_resolution_deadline, r.yes_rule AS revision_yes_rule,
+      r.no_rule AS revision_no_rule, r.equality_rule AS revision_equality_rule,
+      r.sources_json AS revision_sources_json, r.fallback_rule AS revision_fallback_rule,
+      r.unavailable_data_rule AS revision_unavailable_data_rule, r.collateral AS revision_collateral,
+      r.fee_bps AS revision_fee_bps, r.resolver AS revision_resolver,
+      r.policy_version AS revision_policy_version, r.implementation_version AS revision_implementation_version,
+      d.status AS draft_status, d.current_revision_id, rv.revoked_at AS reviewer_revoked_at
     FROM publication_intents pi
     JOIN drafts d ON d.id=pi.draft_id
     JOIN draft_revisions r ON r.id=pi.revision_id
@@ -671,9 +735,15 @@ export function createApi(options={}){
                 return send(200,{intent:reconciled,reused:true});
               }
             }
+            let encodedRules;
+            try{
+              encodedRules=encodeRulesV1(buildCanonicalRulesInput(revision));
+            }catch(rulesErr){
+              throw new ApiError(409,`Approved revision is incomplete for canonical ${RULES_SCHEMA} publication (${rulesErr.message}); revise and obtain a fresh approval`);
+            }
             const paramsJson=canonicalJson(params);
             const paramsDigest=hash(paramsJson);
-            const rulesDigest=revision.content_hash;
+            const rulesDigest=encodedRules.digest;
             const insert=db.prepare(`
               INSERT INTO publication_intents(
                 draft_id,revision_id,review_decision_id,creator_wallet,reviewer_wallet,

@@ -720,7 +720,11 @@ test('W23: approved revision produces an off-chain publication intent pinned to 
   assert.equal(intent.reviewerWallet,s.reviewer.publicKey());
   assert.equal(intent.targetNetwork,'testnet');
   assert.equal(intent.networkPassphrase,'Test SDF Network ; September 2015');
-  assert.equal(intent.rulesDigest,s.contentHash);
+  assert.equal(intent.revisionContentHash,s.contentHash);
+  assert.equal(intent.rulesDigestVersion,'revmarket.rules.v1');
+  assert.notEqual(intent.rulesDigest,s.contentHash);
+  assert.ok(/^[0-9a-f]{64}$/.test(intent.rulesDigest));
+  assert.equal(intent.canonicalRules.schema,'revmarket.rules.v1');
   assert.equal(intent.approvalExpiry,5000);
   assert.ok(/^[0-9a-f]{64}$/.test(intent.paramsHash));
 
@@ -825,7 +829,7 @@ test('W23: a different parameter set is rejected and requires a fresh approval o
   assert.equal(diffNested.status,409);
 
   // Edit the draft with new parameters -> invalidates previous intent and approval
-  const edited=await s.f.call(`/drafts/${s.draftId}`,{method:'PUT',cookie:s.cc,body:draftBody({question:'Updated BTC $120k target?',feeBps:50,expectedRevisionId:s.revisionId})});
+  const edited=await s.f.call(`/drafts/${s.draftId}`,{method:'PUT',cookie:s.cc,body:draftBody({question:'Updated BTC $120k target?',category:'crypto',feeBps:50,resolver:s.reviewer.publicKey(),policyVersion:'v1',implementationVersion:'1',expectedRevisionId:s.revisionId})});
   assert.equal(edited.status,200);
   assert.equal(edited.body.status,'draft');
 
