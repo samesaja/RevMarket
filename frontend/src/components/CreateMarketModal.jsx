@@ -3,7 +3,9 @@ import PhosphorIcon from '../icons/PhosphorIcon.jsx';
 import {
   buildDraftReviewSummary,
   createDraft,
+  getDraft,
   isAiAssistResultStale,
+  listDrafts,
   pinCollateralForDraft,
   requestAiAssist,
   resolveCollateralIdentity,
@@ -121,12 +123,18 @@ export default function CreateMarketModal({
   });
   const {fixtureMode, catalog} = config;
 
-  const [kind, setKind] = useState('event');
+  const [kind, setKind] = useState(() => config.initialDraft?.metadata?.kind || 'event');
+  const [category, setCategory] = useState(() => config.initialDraft?.category || 'Crypto');
+  const [closesInput, setClosesInput] = useState('');
+  const [description, setDescription] = useState(() => config.initialDraft?.yesRule || '');
   const [error, setError] = useState('');
   const [question, setQuestion] = useState(() => config.initialDraft?.question || '');
   const [selectedCollateral, setSelectedCollateral] = useState(() => config.initialCollateral);
   const [savedRevision, setSavedRevision] = useState(() => config.initialDraft || null);
   const [aiLoading, setAiLoading] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [myDrafts, setMyDrafts] = useState([]);
+  const [loadingDrafts, setLoadingDrafts] = useState(false);
   const [aiSuggestions, setAiSuggestions] = useState(null);
   const [savedDraft, setSavedDraft] = useState(null);
   const [revisionConflict, setRevisionConflict] = useState(null);
@@ -134,7 +142,7 @@ export default function CreateMarketModal({
   const aiSuggestionsStale = aiSuggestions && isAiAssistResultStale(
     aiSuggestions,
     savedDraft,
-    {question: question.trim(), category: kind, collateral: selectedCollateral},
+    {question: question.trim(), category, collateral: selectedCollateral},
   );
 
   const resolvedCollateral = resolveCollateralIdentity(selectedCollateral, {
@@ -152,10 +160,134 @@ export default function CreateMarketModal({
   const activeRevisionForSummary = {
     ...(savedRevision || {}),
     question: question.trim() || savedRevision?.question || '',
-    category: kind,
+    category,
     collateral: selectedCollateral,
     revisionNumber: savedRevision?.revisionNumber || 1,
   };
+
+  function resolveTradingCloseSeconds() {
+    if (closesInput) {
+      const parsed = Math.floor(new Date(closesInput).getTime() / 1000);
+      if (Number.isSafeInteger(parsed) && parsed > 0) return parsed;
+    }
+    return savedRevision?.tradingClose || (Math.floor(Date.now() / 1000) + 86400 * 7);
+  }
+
+  async function persistCurrentDraft(overwriteRevisionId) {
+    const pinnedCollateral = pinCollateralForDraft(selectedCollateral, {
+      fixtureMode,
+      allowlist: collateralAllowlist,
+      catalog,
+    });
+    const tradingClose = resolveTradingCloseSeconds();
+    const draftData = {
+      question: question.trim(),
+      category,
+      tradingClose,
+      yesRule: description.trim(),
+      metadata: {kind},
+      collateral: pinnedCollateral,
+    };
+    const collateralOptions = {
+      fixtureMode,
+      allowlist: collateralAllowlist,
+      catalog,
+    };
+    let next;
+    if (!savedDraft) {
+      const draft = await createDraft({...draftData, origin: 'manual'}, collateralOptions);
+      next = {draftId: draft.id, revisionId: draft.revisionId, revisionNumber: 1, contentHash: draft.contentHash};
+    } else {
+      const saved = await updateDraft(savedDraft.draftId, draftData, {
+        ...collateralOptions,
+        expectedRevisionId: overwriteRevisionId ?? savedDraft.revisionId,
+      });
+      next = {draftId: savedDraft.draftId, revisionId: saved.revisionId, revisionNumber: saved.revisionNumber, contentHash: saved.contentHash};
+    }
+    setSavedDraft(next);
+    setRevisionConflict(null);
+    setSelectedCollateral(pinnedCollateral);
+    setSavedRevision({
+      id: next.draftId,
+      revisionId: next.revisionId,
+      revisionNumber: next.revisionNumber,
+      contentHash: next.contentHash,
+      question: draftData.question,
+      category: draftData.category,
+      tradingClose: draftData.tradingClose,
+      yesRule: draftData.yesRule,
+      metadata: draftData.metadata,
+      collateral: pinnedCollateral,
+    });
+    return {next, draftData, pinnedCollateral};
+  }
+
+  async function handleManualSave(overwriteRevisionId) {
+    if (!question.trim()) {
+      setError('Please provide a question before saving a draft.');
+      return;
+    }
+    setError('');
+    setSavingDraft(true);
+    try {
+      await persistCurrentDraft(overwriteRevisionId);
+    } catch (err) {
+      if (err.status === 409 && err.body?.code === 'revision_conflict') {
+        setRevisionConflict({currentRevisionId: err.body.currentRevisionId, currentRevisionNumber: err.body.currentRevisionNumber});
+      } else {
+        setError(err.message || 'Could not save draft.');
+      }
+    } finally {
+      setSavingDraft(false);
+    }
+  }
+
+  async function handleLoadMyDrafts() {
+    setError('');
+    setLoadingDrafts(true);
+    try {
+      const res = await listDrafts();
+      setMyDrafts(Array.isArray(res?.drafts) ? res.drafts : []);
+    } catch (err) {
+      setError(err.message || 'Could not load saved drafts.');
+    } finally {
+      setLoadingDrafts(false);
+    }
+  }
+
+  async function handleSelectDraft(draftId) {
+    if (!draftId) return;
+    setError('');
+    setLoadingDrafts(true);
+    try {
+      const res = await getDraft(draftId);
+      const rev = res?.revisions?.[0];
+      if (!rev) throw new Error('Draft revision not found.');
+      setSavedDraft({
+        draftId: res.draft.id,
+        revisionId: rev.id,
+        revisionNumber: rev.revisionNumber,
+        contentHash: rev.contentHash,
+        status: res.draft.status,
+      });
+      setSavedRevision(rev);
+      setQuestion(rev.question || '');
+      setCategory(rev.category || 'Crypto');
+      setKind(rev.metadata?.kind || 'event');
+      setDescription(rev.yesRule || '');
+      if (rev.collateral) setSelectedCollateral(rev.collateral);
+      if (rev.tradingClose) {
+        const iso = new Date(Number(rev.tradingClose) * 1000).toISOString().slice(0, 16);
+        setClosesInput(iso);
+      }
+      setRevisionConflict(null);
+      setAiSuggestions(null);
+    } catch (err) {
+      setError(err.message || 'Could not load selected draft.');
+    } finally {
+      setLoadingDrafts(false);
+    }
+  }
 
   async function handleAiAssist(overwriteRevisionId) {
     if (!question.trim()) {
@@ -164,61 +296,14 @@ export default function CreateMarketModal({
     }
     setError('');
     setAiSuggestions(null);
-    let pinnedCollateral;
-    try {
-      pinnedCollateral = pinCollateralForDraft(selectedCollateral, {
-        fixtureMode,
-        allowlist: collateralAllowlist,
-        catalog,
-      });
-    } catch (collateralErr) {
-      setError(collateralErr.message);
-      return;
-    }
     setAiLoading(true);
     try {
-      const closesAt = Math.floor(Date.now() / 1000) + 86400 * 7;
-      const draftData = {
-        question: question.trim(),
-        category: kind,
-        tradingClose: closesAt,
-        collateral: pinnedCollateral,
-      };
+      const {next, draftData} = await persistCurrentDraft(overwriteRevisionId);
       const sourceForm = {
         question: draftData.question,
         category: draftData.category,
         collateral: draftData.collateral,
       };
-      const collateralOptions = {
-        fixtureMode,
-        allowlist: collateralAllowlist,
-        catalog,
-      };
-      let next;
-      if (!savedDraft) {
-        const draft = await createDraft({...draftData, origin: 'manual'}, collateralOptions);
-        next = {draftId: draft.id, revisionId: draft.revisionId, revisionNumber: 1, contentHash: draft.contentHash};
-      } else {
-        // Edit the same draft, based on the revision this modal last saved (or, after an explicit
-        // overwrite choice, on the newer revision reported by the conflict response).
-        const saved = await updateDraft(savedDraft.draftId, draftData, {
-          ...collateralOptions,
-          expectedRevisionId: overwriteRevisionId ?? savedDraft.revisionId,
-        });
-        next = {draftId: savedDraft.draftId, revisionId: saved.revisionId, revisionNumber: saved.revisionNumber, contentHash: saved.contentHash};
-      }
-      setSavedDraft(next);
-      setRevisionConflict(null);
-      setSelectedCollateral(pinnedCollateral);
-      setSavedRevision({
-        id: next.draftId,
-        revisionId: next.revisionId,
-        revisionNumber: next.revisionNumber,
-        contentHash: next.contentHash,
-        question: question.trim(),
-        category: kind,
-        collateral: pinnedCollateral,
-      });
       const res = await requestAiAssist(next.draftId, next.revisionId);
       setAiSuggestions({
         ...res,
@@ -295,6 +380,21 @@ export default function CreateMarketModal({
         <button className="icon-button" aria-label="Close dialog" onClick={onClose}><PhosphorIcon name="close" /></button>
       </div>
       <form className="dialog-form" onSubmit={submit}>
+        <div className="form-row" style={{alignItems: 'center', justifyContent: 'space-between'}}>
+          <button type="button" className="button button-secondary" disabled={loadingDrafts || busy} onClick={handleLoadMyDrafts}>
+            {loadingDrafts ? 'Loading drafts…' : 'My drafts'}
+          </button>
+          {myDrafts.length > 0 && (
+            <select aria-label="Reopen saved draft" value={savedDraft?.draftId || ''} onChange={e => handleSelectDraft(Number(e.target.value))}>
+              <option value="">Select a saved draft…</option>
+              {myDrafts.map(d => (
+                <option key={d.id} value={d.id}>
+                  #{d.id} · {d.currentRevision?.question || 'Untitled'} ({d.status})
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
         <div className="form-row">
           <label>Market type
             <select value={kind} onChange={event => setKind(event.target.value)}>
@@ -303,7 +403,7 @@ export default function CreateMarketModal({
             </select>
           </label>
           <label>Category
-            <select name="category">
+            <select name="category" value={category} onChange={event => setCategory(event.target.value)}>
               <option value="Crypto">Crypto</option>
               <option value="Sports">Sports</option>
               <option value="Food & Dining">Food & Dining</option>
@@ -351,14 +451,20 @@ export default function CreateMarketModal({
           <label>Question
             <div style={{display: 'flex', gap: '8px', marginTop: '4px'}}>
               <input name="question" value={question} onChange={e => setQuestion(e.target.value)} required maxLength="512" placeholder="Use a precise, verifiable yes/no question" style={{flex: 1}} />
-              <button type="button" className="button button-secondary" disabled={aiLoading || busy || !resolvedCollateral.available} onClick={() => handleAiAssist()} style={{whiteSpace: 'nowrap'}}>
+              <button type="button" className="button button-secondary" disabled={savingDraft || aiLoading || busy || !resolvedCollateral.available} onClick={() => handleManualSave()} style={{whiteSpace: 'nowrap'}}>
+                {savingDraft ? 'Saving…' : savedDraft ? 'Save revision' : 'Save draft'}
+              </button>
+              <button type="button" className="button button-secondary" disabled={aiLoading || savingDraft || busy || !resolvedCollateral.available} onClick={() => handleAiAssist()} style={{whiteSpace: 'nowrap'}}>
                 {aiLoading ? 'Analyzing…' : 'Improve with AI'}
               </button>
             </div>
           </label>
           {revisionConflict && <div className="form-note" role="alert" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
             <p><PhosphorIcon name="info" size={14} /> This draft was changed in another tab or window (now revision {revisionConflict.currentRevisionNumber}). Your text is still here; nothing was overwritten.</p>
-            <button type="button" className="button button-secondary" disabled={aiLoading || busy} onClick={() => handleAiAssist(revisionConflict.currentRevisionId)}>Save my version as a new revision</button>
+            <div style={{display: 'flex', gap: '8px', marginTop: '6px'}}>
+              <button type="button" className="button button-secondary" disabled={savingDraft || aiLoading || busy} onClick={() => handleManualSave(revisionConflict.currentRevisionId)}>Save my version as a new revision</button>
+              {savedDraft && <button type="button" className="button button-secondary" disabled={loadingDrafts || busy} onClick={() => handleSelectDraft(savedDraft.draftId)}>Reload latest server revision</button>}
+            </div>
           </div>}
           {aiSuggestions && <div className="form-note" role="status" style={{padding: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', margin: '8px 0'}}>
             <p><strong>AI Suggestions · draft revision #{aiSuggestions.sourceRevision.revisionNumber}</strong></p>
@@ -385,11 +491,11 @@ export default function CreateMarketModal({
           </div>}
         </div>}
         {kind === 'price' && <div className="form-row"><label>Asset<select name="asset"><option>BTC</option><option>ETH</option><option>XLM</option></select></label><label>Target USD<input name="target" required inputMode="decimal" placeholder="e.g. 85000" /></label></div>}
-        <label>Close time<input name="closes" type="datetime-local" required /></label>
+        <label>Close time<input name="closes" type="datetime-local" value={closesInput} onChange={e => setClosesInput(e.target.value)} required /></label>
         <label>Market artwork <span className="field-optional">Optional · custom image or auto-generated</span><input name="imageFile" type="file" accept="image/jpeg,image/png,image/webp" /></label>
         <p className="form-note">Artwork uploads are pinned by the backend; an off-chain Freighter sign-in may be requested. Only the image CID is stored on-chain.</p>
         <label>Resolution details / Description <span className="field-optional">Optional</span>
-          <textarea name="description" rows="3" placeholder="Explain the resolution source, criteria, and evidence rules..." style={{width: '100%', resize: 'vertical'}} />
+          <textarea name="description" rows="3" value={description} onChange={e => setDescription(e.target.value)} placeholder="Explain the resolution source, criteria, and evidence rules..." style={{width: '100%', resize: 'vertical'}} />
         </label>
         <CollateralReviewSummary
           revision={activeRevisionForSummary}

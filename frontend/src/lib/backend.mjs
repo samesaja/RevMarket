@@ -667,6 +667,10 @@ export async function updateDraft(draftId, draftData = {}, {expectedRevisionId, 
   return await api(`/drafts/${draftId}`, {method: 'PUT', body: {...draftData, collateral, expectedRevisionId}});
 }
 
+export async function listDrafts() {
+  return await api('/drafts');
+}
+
 export async function getDraft(draftId) {
   return await api(`/drafts/${draftId}`);
 }
