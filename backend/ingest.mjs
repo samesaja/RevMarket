@@ -156,6 +156,17 @@ async function runLiveIngest() {
 
 if (process.argv.includes('--fixture')) {
   await runFixtureDrill();
+} else if (process.argv.includes('--watch') || Number(process.env.INGEST_INTERVAL_MS || 0) > 0 && process.env.RUN_ONCE !== '1') {
+  const intervalMs = Math.max(1000, Number(process.env.INGEST_INTERVAL_MS || 15000));
+  let stopping = false;
+  const stop = () => { stopping = true; };
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+  do {
+    await runLiveIngest();
+    if (stopping || process.env.RUN_ONCE === '1') break;
+    await new Promise(r => setTimeout(r, intervalMs));
+  } while (!stopping);
 } else {
   await runLiveIngest();
 }

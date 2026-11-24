@@ -18,6 +18,9 @@ services:
       APP_ORIGIN: ${APP_ORIGIN:?APP_ORIGIN is required}
       BACKEND_DB: /var/lib/revmarket/db/revmarket.sqlite
       BACKEND_SHUTDOWN_TIMEOUT_MS: ${BACKEND_SHUTDOWN_TIMEOUT_MS:-5000}
+      CONTRACT_ID: ${CONTRACT_ID:?CONTRACT_ID is required}
+      STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      INDEXER_STALE_AFTER_SECONDS: ${INDEXER_STALE_AFTER_SECONDS:-900}
       SUPER_ADMIN_WALLETS: ${SUPER_ADMIN_WALLETS:-}
       PINATA_JWT: ${PINATA_JWT:-}
       AI_ENABLED: ${AI_ENABLED:-false}
@@ -41,6 +44,24 @@ services:
       retries: 3
       start_period: 10s
 
+  ingestor:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    command: ["node", "--experimental-sqlite", "backend/ingest.mjs", "--watch"]
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 15s
+    environment:
+      BACKEND_DB: /var/lib/revmarket/db/revmarket.sqlite
+      CONTRACT_ID: ${CONTRACT_ID:?CONTRACT_ID is required}
+      STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+      INGEST_INTERVAL_MS: ${INGEST_INTERVAL_MS:-15000}
+      INGEST_PAGE_LIMIT: ${INGEST_PAGE_LIMIT:-100}
+      INGEST_MAX_PAGES: ${INGEST_MAX_PAGES:-25}
+    volumes:
+      - ../../:/app:ro
+      - revmarket_staging_db:/var/lib/revmarket/db
+
   worker:
     image: node:22-bookworm-slim
     working_dir: /app
@@ -53,10 +74,12 @@ services:
       RESOLVER_SECRET: ${RESOLVER_SECRET:?RESOLVER_SECRET is required}
       STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
       EVENT_SOURCE_URLS: ${EVENT_SOURCE_URLS:-[]}
+      ATTEMPTS_DB_PATH: ${ATTEMPTS_DB_PATH:-/var/lib/revmarket/worker/attempts.sqlite}
+      EVIDENCE_DIR: ${EVIDENCE_DIR:-/var/lib/revmarket/evidence}
       RUN_ONCE: ${RUN_ONCE:-0}
     volumes:
       - ../../:/app:ro
-      - revmarket_staging_evidence:/app/service/evidence
+      - revmarket_staging_evidence:/var/lib/revmarket/evidence
       - revmarket_staging_worker_state:/var/lib/revmarket/worker
 
 volumes:
